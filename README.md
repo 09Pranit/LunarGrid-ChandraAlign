@@ -36,4 +36,14 @@ GeoTIFF export requires the backend to supply `registered_geotiff_base64` contai
 
 `vercel.json` builds the same React workstation with `vite.vercel.config.ts`. The `vercel-entry` wrapper reuses `app/page.tsx`, all components, the existing CSS, and image assets. The registration API remains an external service configured in Settings.
 
-Build with `node node_modules/vite/bin/vite.js build --config vite.vercel.config.ts`. Vercel publishes `vercel-dist`. Deploy with `vercel --prod`; configure `LUNARGRID_ALLOWED_ORIGINS` on your registration backend to include the final Vercel URL.
+Import this GitHub repository into Vercel with these settings:
+
+- Framework Preset: **Vite** (single frontend project).
+- Root Directory: **.** (repository root, where `vercel.json` lives).
+- Build Command: **npm run build**.
+- Output Directory: **vercel-dist**.
+- Install Command: leave the automatic default.
+
+If the import screen detects `frontend` and `backend` as multiple services and says "vercel.json required to deploy projects with multiple services", switch to a single Vite project before deploying. Do not accept the generated multi-service configuration: this repository's Vercel configuration deploys the frontend, while `backend/` contains a separately run Python processing service. The public sample workflow runs without that service; real uploaded-image registration requires its URL in Settings.
+
+Build locally with `npm run build`, then deploy with `vercel --prod`. Configure `LUNARGRID_ALLOWED_ORIGINS` on your registration backend to include the final Vercel URL. The original Sites build remains available through `pnpm build:sites`.

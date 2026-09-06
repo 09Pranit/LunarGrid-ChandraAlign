@@ -6,9 +6,12 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
-    "build": "vinext build",
-    "start": "wrangler dev --config dist/server/wrangler.json",
+    "dev": "vite --config vite.vercel.config.ts --port 3000",
+    "build": "vite build --config vite.vercel.config.ts",
+    "start": "vite preview --config vite.vercel.config.ts --port 3000",
+    "dev:sites": "vinext dev",
+    "build:sites": "vinext build",
+    "start:sites": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
     "format": "oxfmt"
   },
