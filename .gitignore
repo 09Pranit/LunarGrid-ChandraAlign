@@ -28,6 +28,7 @@ yarn-error.log*
 
 # local environment
 .env*
+.openai
 
 # deployment and generated files
 .vercel
