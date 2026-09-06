@@ -24,4 +24,9 @@ if __name__ == "__main__":
     result = register_images(source, reference)
     assert result.metrics["accepted_matches"] >= 8
     assert result.metrics["rmse_px"] < 3.0
+    assert len(result.tie_points) == result.metrics["candidate_matches"]
+    assert sum(p["status"] == "accepted" for p in result.tie_points) == result.metrics["accepted_matches"]
+    assert sum(p["status"] == "rejected" for p in result.tie_points) == result.metrics["rejected_matches"]
+    assert all(p["confidence"] is None for p in result.tie_points)
+    assert result.metrics["registration_method"] == "Homography (USAC_MAGSAC)"
     print(result.metrics)

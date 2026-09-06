@@ -19,6 +19,7 @@ class RegistrationResult:
     matches_preview: np.ndarray
     transform: np.ndarray
     metrics: dict
+    tie_points: list[dict]
 
 
 def _gray(image: np.ndarray) -> np.ndarray:
@@ -97,6 +98,8 @@ def register_images(source: np.ndarray, reference: np.ndarray, ratio: float = 0.
         "engine": "SIFT + FLANN + USAC_MAGSAC",
         "candidate_matches": len(good),
         "accepted_matches": inliers,
+        "rejected_matches": len(good) - inliers,
+        "registration_method": "Homography (USAC_MAGSAC)",
         "inlier_ratio": round(inliers / len(good), 4),
         "rmse_px": round(rmse, 4),
         "median_error_px": round(float(np.median(distances)), 4),
@@ -105,4 +108,16 @@ def register_images(source: np.ndarray, reference: np.ndarray, ratio: float = 0.
         "runtime_seconds": round(runtime, 4),
         "validation_note": "Residuals are computed on model inliers. For mission claims, add independent held-out checkpoints.",
     }
-    return RegistrationResult(aligned, src_conditioned, preview, transform, metrics)
+    tie_points = [
+        {
+            "id": f"LG-{i + 1:04d}",
+            "source_x": round(float(src_pts[i, 0, 0]), 3),
+            "source_y": round(float(src_pts[i, 0, 1]), 3),
+            "reference_x": round(float(ref_pts[i, 0, 0]), 3),
+            "reference_y": round(float(ref_pts[i, 0, 1]), 3),
+            "confidence": None,  # This classical matcher supplies no calibrated probability.
+            "status": "accepted" if inlier_mask[i] else "rejected",
+        }
+        for i in range(len(good))
+    ]
+    return RegistrationResult(aligned, src_conditioned, preview, transform, metrics, tie_points)

@@ -19,3 +19,15 @@ python -m venv .venv
 ```
 
 Open the API documentation at `http://localhost:8000/docs`. Production accuracy claims must use named Chandrayaan/LROC products and independent held-out checkpoints.
+
+## Research workstation controls
+
+The four viewer modes share zoom, pan, fit, and pixel inspection. Pixel values are 8-bit preview samples, not original calibrated DN values. Overlay compares source against reference. Tie Points shows both endpoints, with green circles for accepted matches and red crosses for rejected matches; the selector supports keyboard inspection.
+
+The example uses a single real LROC WAC photograph of Tycho crater (NASA/GSFC/Arizona State University), shifted by 18/-12 pixels for the source. OHRC/NAC dataset names and acquisition metadata are illustrative and do not describe that photograph. All 48 demo correspondences and quality figures are simulated. Reports and CSV rows carry an explicit simulation marker.
+
+Image source: https://science.nasa.gov/image-detail/amf-cc06843a-5b68-4cb4-9119-c62e383b54fa/
+
+For real images, load both files, optionally load each PDS4 XML label, and set the service URL in Settings. Uploading invalidates the simulated results. The existing backend now returns source/reference previews and all accepted/rejected point coordinates in `tie_points`; confidence is null because the classical matcher does not produce calibrated probabilities. Its actual alignment remains homography, and is identified as such in the UI rather than claimed as TPS/LightGlue. Configure `LUNARGRID_ALLOWED_ORIGINS` as a comma-separated list when using another UI origin.
+
+GeoTIFF export requires the backend to supply `registered_geotiff_base64` containing a valid georeferenced lunar raster. The included classical backend does not yet preserve a lunar CRS or emit this field. Until it does, this menu item explains the missing output; it never fabricates georeferencing. CSV and JSON registration reports download directly and include dataset metadata, method, match counts, RMSE, coverage, and runtime.
