@@ -40,5 +40,12 @@ next-env.d.ts
 /.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.mypy_cache/
 *.tsbuildinfo
 /vercel-dist/
