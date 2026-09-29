@@ -1,0 +1,9 @@
+# Optional neural runtime; classical matching only needs requirements.txt.
+# Install a matching torch/torchvision pair for your CPU/CUDA platform first.
+torch==2.13.0
+torchvision==0.28.0
+kornia==0.8.3
+matplotlib>=3.5
+# Then install the pinned upstream code WITHOUT dependencies, avoiding its
+# opencv-python dependency conflicting with our opencv-python-headless:
+# python -m pip install --no-deps "lightglue @ git+https://github.com/cvg/LightGlue.git@eb42fee2d71449efb0aa5c10549752b5d75384d8"

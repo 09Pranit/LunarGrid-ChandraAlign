@@ -1,0 +1,8 @@
+# Phase 3: both inclusive limits must pass to select sift_flann.
+# Otherwise select superpoint_lightglue. Angles are in degrees, entropy in bits.
+routing:
+  entropy_threshold: 0.8
+  geometry_threshold: 3.0
+  # Directional GSD term: abs(GSD_src / GSD_ref - 1), not max/min.
+  w1: 0.5
+  w2: 0.5
