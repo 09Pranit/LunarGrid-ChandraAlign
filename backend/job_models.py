@@ -10,10 +10,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 if __package__:
     from .lunar_core.io.pds4_parser import LunarTelemetryMetadata
-    from .lunar_core.io.metadata import ImageMetadata, Mode, Tile, DEFAULT_TILE_PIXELS
 else:
     from lunar_core.io.pds4_parser import LunarTelemetryMetadata
-    from lunar_core.io.metadata import ImageMetadata, Mode, Tile, DEFAULT_TILE_PIXELS
 
 
 class ReferenceGrid(BaseModel):
@@ -25,15 +23,6 @@ class ReferenceGrid(BaseModel):
 
 class JobParams(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    schema_version: Literal[1, 2] = 1
-    source_mode: Mode = "auto"
-    reference_mode: Mode = "auto"
-    source_tile: Tile | None = None
-    reference_tile: Tile | None = None
-    source_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    reference_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    confirm_unknown_overlap: bool = False
-    verify_checksum: bool = False
     engine: Literal["auto", "sift_flann", "superpoint_lightglue"] = "auto"
     source_metadata: LunarTelemetryMetadata | None = None
     reference_metadata: LunarTelemetryMetadata | None = None
@@ -41,17 +30,10 @@ class JobParams(BaseModel):
 
     @model_validator(mode="after")
     def paired_metadata(self):
+        if (self.source_metadata is None) != (self.reference_metadata is None):
+            raise ValueError("Supply both source_metadata and reference_metadata")
         json.dumps(self.model_dump(), allow_nan=False)
         return self
-
-
-class ValidatedJobParams(JobParams):
-    source_record: ImageMetadata
-    reference_record: ImageMetadata
-    max_tile_pixels: int = DEFAULT_TILE_PIXELS
-    max_memory_bytes: int = 1536 * 1024**2
-    worker_timeout: int = 900
-    overlap_status: str = "unknown"
 
 
 class JobStatus(BaseModel):
@@ -113,18 +95,11 @@ class Settings:
         "LUNARGRID_DATA_DIR", str(Path(__file__).resolve().parents[1] / "work" / "jobs"))))
     broker_url: str = field(default_factory=lambda: os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"))
     always_eager: bool = field(default_factory=lambda: env_bool("CELERY_TASK_ALWAYS_EAGER", False))
-    eager_fallback: bool = field(default_factory=lambda: env_bool("LUNARGRID_EAGER_FALLBACK", False))
+    eager_fallback: bool = field(default_factory=lambda: env_bool("LUNARGRID_EAGER_FALLBACK", True))
     max_upload_bytes: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_UPLOAD_BYTES", 512 * 1024**2)))
     max_pixels: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_PIXELS", 16_777_216)))
-    max_tile_pixels: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_TILE_PIXELS", DEFAULT_TILE_PIXELS)))
-    max_memory_bytes: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_MEMORY_BYTES", 1536 * 1024**2)))
-    max_storage_bytes: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_STORAGE_BYTES", 8 * 1024**3)))
-    min_free_bytes: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MIN_FREE_BYTES", 1024**3)))
-    max_request_bytes: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_REQUEST_BYTES", 1024**3 + 3 * 1024**2)))
-    max_active_jobs: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_MAX_ACTIVE_JOBS", 2)))
-    upload_timeout: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_UPLOAD_TIMEOUT", 120)))
     job_timeout: int = field(default_factory=lambda: int(os.getenv("LUNARGRID_JOB_TIMEOUT", 900)))
 
     def __post_init__(self):
-        if min(self.max_upload_bytes, self.max_pixels, self.job_timeout, self.max_tile_pixels, self.max_memory_bytes, self.max_storage_bytes, self.min_free_bytes, self.max_request_bytes, self.max_active_jobs, self.upload_timeout) <= 0:
+        if min(self.max_upload_bytes, self.max_pixels, self.job_timeout) <= 0:
             raise ValueError("Upload, pixel, and timeout limits must be positive")

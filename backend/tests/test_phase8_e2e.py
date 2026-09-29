@@ -47,11 +47,11 @@ def files_for(pair):
             for name, image in zip(("source", "reference"), pair)}
 
 
-def label(instrument, gsd, incidence, name):
+def label(instrument, gsd, incidence):
     return f"""<Product_Observational xmlns="http://pds.nasa.gov/pds4/pds/v1">
       <instrument_name>{instrument}</instrument_name><pixel_resolution unit="m">{gsd}</pixel_resolution>
       <incidence_angle unit="deg">{incidence}</incidence_angle><emission_angle>2</emission_angle>
-      <solar_azimuth_angle>65</solar_azimuth_angle><File_Area_Observational_Supplemental><File><file_name>{name}</file_name></File><Encoded_Image><offset unit="byte">0</offset><encoding_standard_id>PNG</encoding_standard_id></Encoded_Image></File_Area_Observational_Supplemental></Product_Observational>""".encode()
+      <solar_azimuth_angle>65</solar_azimuth_angle></Product_Observational>""".encode()
 
 
 def poll(client, job_id, deadline):
@@ -75,7 +75,7 @@ def settings(tmp_path):
 
 def assert_completed(client, result, elapsed):
     JobResult.model_validate(result)
-    assert result["status"] == "review_required", result # unknown lunar geometry remains review-required
+    assert result["status"] == "complete", result
     metrics, artifacts = result["metrics"], result["artifacts"]
     assert metrics["active_engine"] == "superpoint_lightglue"
     assert metrics["rmse_basis"] == "withheld_feature_correspondences"
@@ -112,8 +112,8 @@ def assert_completed(client, result, elapsed):
 def test_multisensor_eager_e2e(settings, lunar_pair, monkeypatch):
     monkeypatch.setenv("TORCH_HOME", str(Path(__file__).resolve().parents[2] / "work" / "torch"))
     uploads = files_for(lunar_pair)
-    uploads.update(source_label=("ohrc.xml", label("OHRC", 0.25, 74, "source.png"), "application/xml"),
-                   reference_label=("nac.xml", label("LROC NAC", 2.0, 66, "reference.png"), "application/xml"))
+    uploads.update(source_label=("ohrc.xml", label("OHRC", 0.25, 74), "application/xml"),
+                   reference_label=("nac.xml", label("LROC NAC", 2.0, 66), "application/xml"))
     params = {"reference_grid": {"west_lon": 22.0, "north_lat": 15.0, "pixel_size_deg": 0.001}}
     with TestClient(create_app(settings)) as client:
         started = time.perf_counter()
@@ -125,11 +125,12 @@ def test_multisensor_eager_e2e(settings, lunar_pair, monkeypatch):
         tiff, ties = assert_completed(client, result, time.perf_counter() - started)
         with MemoryFile(tiff) as mem, mem.open() as dataset:
             assert dataset.shape == (512, 512)
-            assert dataset.crs is None # legacy client grid assertions cannot georeference a file
-        assert all(not p["lat"] and not p["lon"] for p in ties)
+            assert "Moon" in dataset.crs.to_wkt()
+            assert dataset.tags()["CRS_IDENTIFIER"] == "IAU2000:30100"
+        assert all(p["lat"] and p["lon"] for p in ties)
         assert result["routing"]["delta_g"] > 3
         dossier = client.get(result["artifacts"]["dossier_url"]).json()
-        assert dossier["metadata"]["source"]["instrument"] == "OHRC"
+        assert dossier["job_telemetry"]["source_metadata"]["instrument"] == "OHRC"
     # Recreate API instance: job state/results survive, without a Redis backend.
     with TestClient(create_app(settings)) as client:
         assert client.get(f"/api/v1/registration/jobs/{receipt['job_id']}/results").json() == result
@@ -143,7 +144,7 @@ def test_actual_celery_worker_async_e2e(settings, lunar_pair, monkeypatch):
     with start_worker(queue, pool="solo", concurrency=1, perform_ping_check=False, shutdown_timeout=10):
         with TestClient(create_app(asynchronous, queue)) as client:
             started = time.perf_counter()
-            response = client.post("/api/v1/registration/jobs", files=files_for(lunar_pair), data={"params":'{"engine":"superpoint_lightglue"}'})
+            response = client.post("/api/v1/registration/jobs", files=files_for(lunar_pair))
             assert response.status_code == 202, response.text
             job_id = response.json()["job_id"]
             pending = client.get(f"/api/v1/registration/jobs/{job_id}/results")
@@ -192,12 +193,11 @@ def test_rejected_geometry_is_review_without_tps(settings, monkeypatch):
                                data={"params": '{"engine":"sift_flann"}'})
         result = poll(client, response.json()["job_id"], time.perf_counter() + 5)
         assert result["status"] == "review_required"
-        assert result["review_reasons"] and not result["artifacts"].get("geotiff_download_url")
-        assert client.get(result["artifacts"]["dossier_url"]).status_code == 200
+        assert result["review_reasons"] and not result["artifacts"]
 
 
 @pytest.mark.parametrize("params", ['{', '{"engine":"fake"}', '{"reference_grid":{"west_lon":NaN}}',
-                                      '{"unknown":true}', '{"source_metadata":{"gsd_meters":0}}'])
+                                      '{"unknown":true}', '{"source_metadata":{}}'])
 def test_bad_options_fail_before_queuing(settings, lunar_pair, params):
     with TestClient(create_app(settings)) as client:
         assert client.post("/api/v1/registration/jobs", files=files_for(lunar_pair),
@@ -242,7 +242,7 @@ def test_chunked_request_limit_closes_partial_multipart_files(settings):
     # No Content-Length: reject while reading, including after spool-to-disk.
     def chunks():
         yield b'--boundary\r\nContent-Disposition: form-data; name="source_file"; filename="x.png"\r\nContent-Type: image/png\r\n\r\n'
-        for _ in range(9):
+        for _ in range(5):
             yield b"x" * 1024**2
         yield b'\r\n--boundary--\r\n'
     with TestClient(create_app(replace(settings, max_upload_bytes=100))) as client:

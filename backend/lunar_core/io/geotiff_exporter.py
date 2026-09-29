@@ -31,8 +31,6 @@ from pyproj import CRS as ProjCRS
 import rasterio
 from rasterio.transform import Affine, array_bounds, from_origin
 
-from .metadata import LunarGrid
-
 logger = logging.getLogger(__name__)
 
 MOON_CRS_ID = "IAU2000:30100"
@@ -127,7 +125,6 @@ def export_geotiff(
     scales: Sequence[float] | None = None,
     offsets: Sequence[float] | None = None,
     units: Sequence[str] | None = None,
-    validated_grid: LunarGrid | None = None,
 ) -> Path:
     """Write and reopen a lossless Moon 2000 TIFF; return its path.
 
@@ -136,8 +133,6 @@ def export_geotiff(
     Integer LZW uses predictor 2; float32 uses predictor 3. Existing output is
     replaced only after a staged file passes spatial/header verification.
     """
-    if not isinstance(validated_grid, LunarGrid) or any(getattr(validated_grid, k) != v for k,v in (("west_lon",west_lon),("north_lat",north_lat),("pixel_size_deg",pixel_size_deg))):
-        raise ValueError("Moon georeferencing requires a validated reference grid matching the export transform")
     bands, transform = _raster_grid(registered, west_lon, north_lat, pixel_size_deg)
     count, height, width = bands.shape
     band_scales = _band_values(scales, count, "scales", 1.0)
@@ -271,7 +266,6 @@ def export_registration_bundle(
     point_ids: Sequence[str | int] | None = None,
     nodata: float | None = None, scales: Sequence[float] | None = None,
     offsets: Sequence[float] | None = None, units: Sequence[str] | None = None,
-    validated_grid: LunarGrid | None = None,
 ) -> ExportArtifacts:
     """Stage all three artifacts, then publish them to output_dir.
 
@@ -324,7 +318,7 @@ def export_registration_bundle(
             registered, stage / artifacts.geotiff.name, west_lon=west_lon,
             north_lat=north_lat, pixel_size_deg=pixel_size_deg,
             metadata={"job_id": job_id, "metrics": metrics, "job_telemetry": telemetry},
-            nodata=nodata, scales=scales, offsets=offsets, units=units, validated_grid=validated_grid,
+            nodata=nodata, scales=scales, offsets=offsets, units=units,
         )
         timeline.append({"stage": "export_geotiff", "started_at_utc": timestamp,
                          "duration_ms": (perf_counter() - start) * 1000})

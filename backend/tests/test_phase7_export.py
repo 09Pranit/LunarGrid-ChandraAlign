@@ -28,12 +28,8 @@ from lunar_core.io.geotiff_exporter import (
     export_registration_bundle, export_tiepoints_csv,
 )
 
-from lunar_core.io.metadata import LunarGrid
-
 logger = logging.getLogger(__name__)
 GRID = {"west_lon": 22.0, "north_lat": 15.0, "pixel_size_deg": 0.001}
-# Explicit synthetic reference fixture; API callers cannot supply this internal record.
-GRID["validated_grid"] = LunarGrid(**GRID)
 
 
 def sample_bundle(tmp_path, **overrides):
@@ -52,15 +48,6 @@ def sample_bundle(tmp_path, **overrides):
         np.random.default_rng(7).integers(0, 256, (512, 512), dtype=np.uint8),
         tmp_path, **args,
     )
-
-
-def test_export_requires_validated_reference_grid(tmp_path):
-    transform = {k: v for k, v in GRID.items() if k != 'validated_grid'}
-    with pytest.raises(ValueError, match='validated'):
-        export_geotiff(np.ones((8, 8), np.uint8), tmp_path / 'invented.tif', **transform)
-    with pytest.raises(ValueError, match='match'):
-        export_geotiff(np.ones((8, 8), np.uint8), tmp_path / 'conflicting.tif', **{**GRID, 'west_lon': 30})
-    assert not list(tmp_path.glob('*.tif'))
 
 
 def assert_lunar_crs(crs):
@@ -233,7 +220,7 @@ def test_empty_tiepoints_produce_header_and_null_fit_rmse(tmp_path):
 def test_continuous_antimeridian_and_zero_origin_grid(tmp_path):
     for west, north in [(179.9, 1), (359.9, 1), (0, 0)]:
         path = export_geotiff(np.zeros((2, 4), dtype=np.uint8), tmp_path / f"{west}.tif",
-                              west_lon=west, north_lat=north, pixel_size_deg=0.1, validated_grid=LunarGrid(west_lon=west,north_lat=north,pixel_size_deg=.1))
+                              west_lon=west, north_lat=north, pixel_size_deg=0.1)
         with rasterio.open(path) as dataset:
             assert dataset.bounds.right == pytest.approx(west + 0.4)
             assert dataset.bounds.bottom == pytest.approx(north - 0.2)

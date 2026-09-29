@@ -338,7 +338,7 @@ class TestValidation:
         with pytest.raises(InvalidTelemetryError, match="latitude"):
             parse_metadata(bad_xml)
 
-    def test_missing_gsd_remains_unknown(self) -> None:
+    def test_missing_gsd_raises(self) -> None:
         """XML with no pixel_resolution tag → error."""
         no_gsd_xml = textwrap.dedent("""\
             <?xml version="1.0" encoding="UTF-8"?>
@@ -358,9 +358,10 @@ class TestValidation:
               </Observation_Area>
             </Product_Observational>
         """).encode("utf-8")
-        assert parse_metadata(no_gsd_xml).gsd_meters is None
+        with pytest.raises(InvalidTelemetryError, match="Missing"):
+            parse_metadata(no_gsd_xml)
 
-    def test_missing_incidence_remains_unknown(self) -> None:
+    def test_missing_incidence_angle_raises(self) -> None:
         """XML with no incidence_angle tag → error."""
         no_inc_xml = textwrap.dedent("""\
             <?xml version="1.0" encoding="UTF-8"?>
@@ -383,7 +384,8 @@ class TestValidation:
               </Observation_Area>
             </Product_Observational>
         """).encode("utf-8")
-        assert parse_metadata(no_inc_xml).incidence_angle_deg is None
+        with pytest.raises(InvalidTelemetryError, match="incidence"):
+            parse_metadata(no_inc_xml)
 
     def test_file_not_found(self) -> None:
         with pytest.raises(FileNotFoundError):

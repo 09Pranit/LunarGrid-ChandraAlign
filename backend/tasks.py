@@ -6,7 +6,6 @@ store, so local eager execution does not require a Redis result backend.
 from __future__ import annotations
 
 import logging
-import shutil
 
 from celery import Celery
 from kombu.exceptions import OperationalError
@@ -43,12 +42,6 @@ def process_registration(job_id: str, storage_dir: str):
     except Exception:
         logger.exception("Registration job %s failed", job_id)
         store.finish(job_id, "failed", error="Registration failed. Check worker logs using the job ID.")
-    finally:
-        directory = store.directory(job_id)
-        for side in ("source.img", "reference.img"):
-            (directory / side).unlink(missing_ok=True)
-        if store.get(job_id)["status"] == "failed" and directory.exists():
-            shutil.rmtree(directory)
 
 
 def build_celery(settings: Settings) -> Celery:

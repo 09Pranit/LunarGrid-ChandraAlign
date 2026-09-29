@@ -2,7 +2,7 @@
 
 LunarGrid's Smart India Hackathon prototype for multi-sensor lunar image co-registration.
 
-The interface provides a labeled demonstration mode and an asynchronous registration workspace. The ingestion schema 2 workspace supports independent PDS3 attached labels, PDS4 XML and image-only inputs, bounded raw raster tiles, mask-aware matching, held-out feature checks and provenance-rich exports through FastAPI and Celery. See [input instructions](docs/pds-inputs.md), [API migration and deployment limits](docs/pds-api-migration.md), and the [implementation walkthrough](walkthrough_pds3_pds4.md).
+The interface provides a labeled demonstration mode and an asynchronous registration workspace. Phase 8 joins PDS4 ingestion, Wallis conditioning, adaptive SIFT/LightGlue matching, subpixel refinement, MAGSAC++/VSUI filtering, TPS warping, and artifact export through FastAPI and Celery.
 
 Local manual testing notes are kept in `MANUAL_TEST_PLAN.md` and excluded from Git because they may contain workstation-specific paths. The demo uses simulated matches and metrics; real-image results require the processing service and independent validation.
 
@@ -28,7 +28,7 @@ Open the API documentation at `http://localhost:8000/docs`. Production accuracy 
 ## Adaptive matcher routing (Phase 3)
 
 `backend/lunar_core/matching/router.py` selects `sift_flann` when both the
-valid-pixel entropy difference is at most 0.8 bits and geometric disparity is at
+zero-masked entropy difference is at most 0.8 bits and geometric disparity is at
 most 3.0; otherwise it selects `superpoint_lightglue`. Edit the `routing` section
 of `backend/config.yaml` to adjust either threshold or geometry weights `w1` and
 `w2` (both default to 0.5). SciPy and PyYAML are included in backend requirements.
@@ -46,7 +46,8 @@ decision = route_pair(
 print(decision.model_dump_json(indent=2))
 ```
 
-Run routing before Wallis conditioning with explicit source/reference validity masks. Valid zero pixels remain valid; all-null tiles are rejected. Adaptive routing requires GSD and incidence on both sides. Otherwise the job pipeline records `insufficient telemetry` and uses SIFT/FLANN, or an explicit engine override. The
+Run routing before Wallis conditioning so null pixels are still zero. All-null
+images are rejected because they have no valid intensity distribution. The
 geometry formula uses the directional ratio `GSD_src/GSD_ref`; reversing a pair
 can change its decision. Incidence differences use degrees. The returned
 Pydantic model contains individual entropies, both disparity metrics, geometry
@@ -255,7 +256,7 @@ authority on readback; `CRS_IDENTIFIER=IAU2000:30100` preserves the identifier.
 Tests compare the reopened CRS semantically with pyproj and check its actual
 spheroid and angular units rather than requiring the incorrect EPSG string.
 
-With `backend/` on the Python import path, continue from Phases 5 and 6. Here `reference_grid` must come from a validated reference TIFF and the selected tile: `inspect_image(path, path.name).grid.window(tile)`. An absent grid requires the ungeoreferenced export path; arbitrary job-supplied numbers cannot establish georeferencing:
+With `backend/` on the Python import path, continue from Phases 5 and 6:
 
 ```python
 import numpy as np
@@ -264,8 +265,7 @@ from lunar_core.io.geotiff_exporter import export_registration_bundle
 residuals = np.linalg.norm(warp.forward(filtered.pts_src) - filtered.pts_ref, axis=1)
 artifacts = export_registration_bundle(
     aligned, "outputs/job-007",
-    west_lon=reference_grid.west_lon, north_lat=reference_grid.north_lat,
-    pixel_size_deg=reference_grid.pixel_size_deg, validated_grid=reference_grid,
+    west_lon=22.0, north_lat=15.0, pixel_size_deg=0.001,  # use the actual reference grid
     tie_points=filtered.tie_points,
     residuals_px=residuals, confidences=filtered.confidences,
     job_id="job-007", rmse_px=validation_rmse_px, rmse_basis="held_out_checkpoints",
@@ -278,7 +278,7 @@ print(artifacts.geotiff, artifacts.tiepoints_csv, artifacts.dossier_json)
 
 Each job produces `registered_output.tif`, `tiepoints.csv`, and
 `registration_dossier.json`. Existing artifact names are refused. The lower-level
-`export_geotiff(array, path, west_lon=..., north_lat=..., pixel_size_deg=..., validated_grid=...)`
+`export_geotiff(array, path, west_lon=..., north_lat=..., pixel_size_deg=...)`
 writes only the TIFF, stages replacements, and checks its reopened spatial header.
 `export_tiepoints_csv` is also independently callable.
 
@@ -297,7 +297,7 @@ to samples. Zero is valid unless explicitly set as `nodata`. Continuous longitud
 allow antimeridian crossings; grids cannot exceed one revolution or the poles.
 Inputs must already be aligned on a lunar geographic grid: this step assigns
 georeferencing, and does not resample another projection or infer calibration.
-The schema 2 job pipeline uses `window_exporter.py`: masked float64 interpolated DN, reference-tile coordinates and four additional full-scene pixel columns. It exports a plain TIFF when the reference grid is unknown.
+Phase 8 connects this exporter to the job API and frontend downloads.
 
 Run `python backend/tests/test_phase7_export.py` for the 512x512 spatial gate,
 header/CRS logs, lossless dtype/channel checks, CSV and dossier validation, and
@@ -315,15 +315,19 @@ The example uses a single real LROC WAC photograph of Tycho crater (NASA/GSFC/Ar
 
 Image source: https://science.nasa.gov/image-detail/amf-cc06843a-5b68-4cb4-9119-c62e383b54fa/
 
-For real images, load both files and select metadata independently on each card. An optional XML belongs only to that image. Inspect and validate a bounded tile for each side, then confirm corresponding tiles when overlap is unknown. Set the service URL in Settings. Uploading invalidates the simulated results. The hook submits a job, polls actual progress, and displays completion or review-required status. Accepted TPS control points retain original pixel coordinates even when the previews are reduced. Match confidence is an engine-specific score, not a calibrated probability. Configure `LUNARGRID_ALLOWED_ORIGINS` as a comma-separated list when using another UI origin.
+For real images, load both files, optionally load both PDS4 XML labels, and set the service URL in Settings. Uploading invalidates the simulated results. The hook submits a job, polls actual progress, and displays completion or review-required status. Accepted TPS control points retain original pixel coordinates even when the previews are reduced. Match confidence is an engine-specific score, not a calibrated probability. Configure `LUNARGRID_ALLOWED_ORIGINS` as a comma-separated list when using another UI origin.
 
-TIFF and tie-point CSV exports download directly from the job's artifact URLs. A validated reference TIFF grid can produce a Moon 2000 GeoTIFF; otherwise the download is explicitly an ungeoreferenced TIFF and CSV latitude/longitude fields are blank. Legacy caller-supplied numeric grids are ignored with a warning. PDS4 acquisition metadata alone does not establish a reference grid. JSON reports record job ID, quality status, RMSE basis, VSUI, and georeferencing status.
+TIFF and tie-point CSV exports download directly from the job's artifact URLs. A caller-supplied lunar geographic reference grid produces a Moon 2000 GeoTIFF; otherwise the download is explicitly an ungeoreferenced TIFF and CSV latitude/longitude fields are blank. PDS4 acquisition metadata alone does not establish a reference grid. JSON reports record job ID, quality status, RMSE basis, VSUI, and georeferencing status.
 
-## Registration API and worker (ingestion schema 2)
+## Production job API and worker (Phase 8)
 
-The complete contract, compatibility changes, quotas and recovery instructions are in [API migration notes](docs/pds-api-migration.md). The `/api/v1/registration/jobs` transport remains compatible with small legacy self-describing uploads. New clients use schema 2, independent modes and explicit tile windows. Labels must associate with the uploaded image; XML-only telemetry cannot decode raw IMG.
+Install `backend/requirements.txt` and, for automatic/neural matching, the Phase 4
+runtime and cached pretrained weights described above. Missing telemetry selects
+LightGlue conservatively; the optional `engine` parameter can explicitly select
+`sift_flann`. There is no silent neural-to-classical fallback.
 
-Start Redis with persistence, then launch API and worker with the same absolute private storage directory and Torch cache:
+Start Redis with persistence enabled, then launch API and worker from the same
+checkout with the same **absolute** data directory and Torch cache:
 
 ```powershell
 $env:CELERY_BROKER_URL = 'redis://localhost:6379/0'
@@ -334,28 +338,110 @@ $env:LUNARGRID_EAGER_FALLBACK = 'false'
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 # Separate terminal with the same environment (Linux production worker):
 python -m celery -A backend.tasks:celery_app worker --loglevel=INFO --concurrency=1
-# Windows local worker: add --pool=solo; hard process time limits require Linux prefork.
+# Windows local worker: add --pool=solo. Eager mode also works without a worker.
 ```
 
-Broker failure fails closed by default. Explicit `CELERY_TASK_ALWAYS_EAGER=true` enables synchronous local development without Redis; the POST then waits for processing. Keep deployment storage outside cloud-sync folders. Use an authenticated gateway, private local volume, retention policy, memory-limited workers and compatible proxy limits. This repository does not implement a user-account system or certify a hosted deployment.
+Local development defaults to automatic synchronous fallback when Redis is
+unreachable. API lifespan sets `task_always_eager=True`; a subsequent publish
+failure also falls back locally. Explicit `CELERY_TASK_ALWAYS_EAGER=true` forces
+local execution. Local eager POST waits for processing but retains the 202 queued
+receipt contract; poll immediately for its terminal result. Restart the API to
+leave startup-selected eager mode after Redis recovers. In production, set
+`LUNARGRID_EAGER_FALLBACK=false`: broker failure returns 503 and a failed job ID.
 
-The browser keeps its 512 MiB file cap. Selected tiles default to at most 1,048,576 pixels; full raw dimensions are checked without decoding the whole scene. Large inputs use [local extraction with original-label provenance](docs/pds-inputs.md#large-scenes-supported-local-extraction). Raw pixels, radiometric scaling, matching stretch and masks remain separate. Unknown geometry forces review and cannot produce invented latitude/longitude.
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /api/v1/registration/jobs` | Multipart `source_file`, `reference_file`; 202 with job ID, queued, progress 0 |
+| `GET /api/v1/registration/jobs/{id}` | 200 status, stage, progress, optional error |
+| `GET /api/v1/registration/jobs/{id}/results` | 202 while pending; 200 complete/review-required result or failed status |
+| `GET /api/v1/artifacts/{id}.tif` | TIFF attachment |
+| `GET /api/v1/artifacts/{id}_tiepoints.csv` | CSV attachment |
+| `GET /api/v1/artifacts/{id}_dossier.json` | Processing dossier |
+| `POST /metadata` | Multipart `label`; validated Phase 1 telemetry |
+| `GET /health` | Process liveness and `eager`/`celery` mode; not a worker readiness probe |
 
-The API provides inspection, submission, status/results, cancellation and TIFF/CSV/dossier downloads. Cancellation is cooperative at processing boundaries; Linux worker hard timeouts bound native calls. Inputs are removed after terminal processing. Feature rejection produces a dossier without a falsely successful raster. Valid map georeferencing does not constitute independent ground validation.
+The hook has migrated from the former synchronous `/register` contract. Optional
+multipart `params` is a JSON string with these fields (unknown fields are rejected):
+
+```json
+{
+  "engine": "auto",
+  "reference_grid": {"west_lon": 22.0, "north_lat": 15.0, "pixel_size_deg": 0.001}
+}
+```
+
+The numeric grid above is illustrative, not Tycho's geolocation. Only provide it
+when the reference raster already uses that north-up square-pixel lunar geographic
+grid. Projected input is not reprojected automatically, and existing TIFF geotags
+are not automatically reused. Optional `source_metadata` and `reference_metadata`
+accept Phase 1 telemetry objects together. Alternatively upload `source_label`
+and `reference_label` XML files together; do not supply both forms of telemetry.
+
+Uploads spool to disk and copy in 1 MiB blocks. Defaults: 512 MiB per image,
+1 MiB per XML label, 16,777,216 decoded pixels per image, each axis 32–32,766 pixels.
+Set `LUNARGRID_MAX_UPLOAD_BYTES` and `LUNARGRID_MAX_PIXELS` to change limits.
+The full request is bounded before multipart parsing, including chunked bodies.
+TIFF/PNG/JPEG/WebP/BMP content is inspected independently of the supplied filename;
+raw PDS IMG arrays need conversion first. Warp/export supports uint8, uint16 and
+float32. Non-finite DN values must be masked/converted before upload. Higher-bit
+matching copies use 1–99 percentile scaling; exported aligned DN values retain
+their original dtype. Previews are limited to 1024 pixels per axis.
+
+SQLite persists status and strict JSON results; task messages contain only job ID
+and storage root. Atomic claims prevent duplicate execution across API/worker
+processes, including uncertain publish acknowledgements. Partial upload staging is
+cleaned up; artifacts are exposed only after successful terminal publication.
+Defaults are a 900-second worker limit and timeout detection after an additional
+30 seconds without progress. Failed jobs have sanitized errors, and logs retain
+the job ID and diagnostic traceback. Polling expires stalled jobs; there is no
+automatic rerun. Browser cancellation stops polling but does not cancel a worker.
+
+This storage model is for processes on **one host/local volume**. Keep the data
+directory outside a live cloud-sync folder in deployment. Distributed hosts need
+a shared object store and transactional database instead of local SQLite/files.
+Configure worker supervision, Redis persistence, a disk-retention policy, and an
+authenticated/rate-limited HTTPS gateway for a public deployment. The API itself
+does not implement user accounts, tenant isolation, or automatic artifact expiry.
+
+Quality uses Phase 5's >=70% inlier ratio, >=15 retained ties and VSUI >=0.75.
+Equal-sized images additionally refine matched positions with pyramidal LK and
+forward/backward checks. The denominator retains the original feature count.
+TPS fits the spatially thinned ties; `rmse_px` is measured on at least eight other
+consensus correspondences. RMSE <=0.50 and VSUI >=0.75 permit `complete`; otherwise
+the status is `review_required`. Without held-out points, fitting RMSE is labeled
+and requires review. Failed Phase 5 geometry never reaches TPS or artifact export.
+These internal feature checks do not establish real mission-level ground accuracy.
 
 Verification:
 
 ```powershell
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
 $env:TORCH_HOME = Join-Path (Get-Location) 'work/torch'
-python -m pytest backend/tests -q
-python -m backend.benchmark_tiles --output work/pds-tile-benchmark.json
+python backend/tests/test_phase8_e2e.py
+python -m pytest backend/tests/ -q -W error
 node --test backend/tests/registration-client.test.mjs
-pnpm exec tsc --noEmit
+node node_modules/typescript/bin/tsc --noEmit
 pnpm build
 ```
 
-Neural tests use the separately installed pinned requirements and cached weights described above. Browser integration instructions and synthetic mixed-standard acceptance coverage are in [input instructions](docs/pds-inputs.md#reproducible-checks). Real Redis delivery and target-host resource measurements remain deployment checks.
+The standalone E2E uses real Tycho crops, real pretrained CPU inference, known
+translation checks, HTTP schema/PNG validation, TIFF/CSV downloads, eager mode,
+and a real Celery consumer over its in-memory test transport. A live Redis server
+is not required by tests; real Redis delivery still needs a deployment smoke test.
+The 15-second gate covers POST through terminal HTTP result for 512x512 cached-weight
+fixtures, including first model construction in a standalone run. Larger uploads,
+queue backlog, cold weight downloads and different hardware have no such guarantee.
+
+Use a clean virtual environment without `--system-site-packages`. Mixing Anaconda
+SciPy/MKL with the PyTorch wheel caused an OpenMP conflict locally; installing the
+pinned PyPI SciPy wheel resolved it. Affine 2.4.0 avoids the Rasterio/Affine 3
+pending-deprecation mismatch. One exact Kornia import-time TorchScript deprecation
+is handled locally in the neural importer; inference and other warnings remain
+enabled, and tests run with `-W error`. The two pre-existing Phase 2 expected
+failures retain the intentionally rejected global-statistics assumptions.
+
+References: [FastAPI file uploads](https://fastapi.tiangolo.com/tutorial/request-files/),
+[Celery configuration](https://docs.celeryq.dev/en/latest/userguide/configuration.html).
 
 ## Vercel deployment
 

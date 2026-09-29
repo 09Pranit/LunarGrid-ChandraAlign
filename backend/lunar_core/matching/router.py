@@ -69,7 +69,7 @@ def load_router_config(path: str | Path | None = None) -> RouterConfig:
     return RouterConfig.model_validate(document["routing"])
 
 
-def compute_illumination_entropy(image: np.ndarray, mask: np.ndarray | None = None) -> float:
+def compute_illumination_entropy(image: np.ndarray) -> float:
     """Return Shannon entropy in bits, excluding exactly-zero null pixels.
 
     Accept a nonempty finite 2D grayscale array already scaled to [0, 255].
@@ -84,9 +84,7 @@ def compute_illumination_entropy(image: np.ndarray, mask: np.ndarray | None = No
         raise ValueError("image must contain real numeric intensities in [0, 255]")
     if not np.isfinite(image).all() or image.min() < 0 or image.max() > 255:
         raise ValueError("image intensities must be finite and in [0, 255]")
-    if mask is not None and (mask.shape != image.shape or mask.dtype != bool):
-        raise ValueError("Entropy mask must be boolean and match image shape")
-    valid = image[mask] if mask is not None else image[image != 0]
+    valid = image[image != 0]
     if valid.size == 0:
         raise ValueError("image contains no nonzero pixels for illumination entropy")
     counts, _ = np.histogram(valid, bins=256, range=(0, 256))
@@ -150,8 +148,6 @@ def route_pair(
     reference_metadata: LunarTelemetryMetadata,
     *,
     config: RouterConfig | None = None,
-    source_mask: np.ndarray | None = None,
-    reference_mask: np.ndarray | None = None,
 ) -> RoutingDecision:
     """Select SIFT+FLANN only when BOTH inclusive disparity limits are met.
 
@@ -162,8 +158,6 @@ def route_pair(
     applications may load once and reuse the immutable RouterConfig. Emits one
     INFO record with metrics, limits, weights, selection and reasons.
     """
-    if any(getattr(m, key, None) is None for m in (source_metadata, reference_metadata) for key in ("gsd_meters", "incidence_angle_deg")):
-        raise ValueError("insufficient telemetry: route_pair requires measured GSD and incidence on both sides")
     settings = load_router_config() if config is None else config
     delta_g = compute_geometric_disparity(
         source_metadata.gsd_meters,
@@ -173,8 +167,8 @@ def route_pair(
         w1=settings.w1,
         w2=settings.w2,
     )
-    entropy_src = compute_illumination_entropy(source_image, source_mask)
-    entropy_ref = compute_illumination_entropy(reference_image, reference_mask)
+    entropy_src = compute_illumination_entropy(source_image)
+    entropy_ref = compute_illumination_entropy(reference_image)
     delta_h = abs(entropy_src - entropy_ref)
     illumination_ok = delta_h <= settings.entropy_threshold
     geometry_ok = delta_g <= settings.geometry_threshold

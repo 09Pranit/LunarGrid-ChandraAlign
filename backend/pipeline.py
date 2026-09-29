@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import csv
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
 from threading import Lock
@@ -14,18 +16,16 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 if __package__:
-    from .job_models import ValidatedJobParams
-    from .lunar_core.io.ingestion import read_tile, stretch
-    from .lunar_core.io.window_exporter import write_bundle, write_dossier
+    from .job_models import JobParams
+    from .lunar_core.io.geotiff_exporter import CSV_COLUMNS, export_registration_bundle
     from .lunar_core.matching import LightGlueMatcher, MatchResult, SIFTMatcher, route_pair
     from .lunar_core.preprocess.wallis import apply_wallis_filter
     from .lunar_core.registration.outlier_rejection import RegistrationRejected, filter_magsac_and_vsui
     from .lunar_core.registration.tps_warper import solve_tps_warp
     from .registration import spatial_coverage
 else:
-    from job_models import ValidatedJobParams
-    from lunar_core.io.ingestion import read_tile, stretch
-    from lunar_core.io.window_exporter import write_bundle, write_dossier
+    from job_models import JobParams
+    from lunar_core.io.geotiff_exporter import CSV_COLUMNS, export_registration_bundle
     from lunar_core.matching import LightGlueMatcher, MatchResult, SIFTMatcher, route_pair
     from lunar_core.preprocess.wallis import apply_wallis_filter
     from lunar_core.registration.outlier_rejection import RegistrationRejected, filter_magsac_and_vsui
@@ -122,57 +122,40 @@ def refine_matches(matches: MatchResult, source: np.ndarray, reference: np.ndarr
 
 def run_pipeline(directory: Path, raw_params: dict, progress) -> dict:
     started = perf_counter()
-    params = ValidatedJobParams.model_validate(raw_params)
+    params = JobParams.model_validate(raw_params)
     job_id = directory.name
     timeline = []
 
     def stage(percent, name):
-        if perf_counter() - started > params.worker_timeout:
-            raise ValueError("Worker time quota exceeded")
         progress(percent, name)
         timeline.append({"stage": name, "elapsed_seconds": perf_counter() - started})
 
     stage(10, "ingestion")
-    pixels = sum(t.width * t.height for t in (params.source_tile, params.reference_tile))
-    if pixels * 512 + 256 * 1024**2 > params.max_memory_bytes:
-        raise ValueError("Worker allocation estimate exceeds configured memory budget")
-    src_data = read_tile(directory / "source.img", params.source_record, params.source_tile, max_pixels=params.max_tile_pixels)
-    ref_data = read_tile(directory / "reference.img", params.reference_record, params.reference_tile, max_pixels=params.max_tile_pixels)
-    source, reference = src_data.raw, ref_data.raw
-    src_gray, ref_gray = src_data.display, ref_data.display
-    src_mask, ref_mask = src_data.valid, ref_data.valid
-    if not src_mask.any() or not ref_mask.any():
-        raise ValueError("All-null tile cannot be registered")
+    source = cv2.imread(str(directory / "source.img"), cv2.IMREAD_UNCHANGED)
+    reference = cv2.imread(str(directory / "reference.img"), cv2.IMREAD_UNCHANGED)
+    src_gray, ref_gray = gray_byte(source), gray_byte(reference)
+    if params.reference_grid:
+        grid = params.reference_grid
+        if grid.north_lat - grid.pixel_size_deg * reference.shape[0] < -90 or grid.pixel_size_deg * reference.shape[1] > 360:
+            raise ValueError("Reference grid exceeds lunar bounds")
     stage(20, "routing")
-    metadata = (params.source_record, params.reference_record)
-    trustworthy = all(getattr(m, field) is not None and 'unverified' not in m.field_provenance.get(field, '')
-                      for m in metadata for field in ('gsd_meters', 'incidence_angle_deg'))
-    if trustworthy:
-        decision = route_pair(src_gray, ref_gray, *metadata, source_mask=src_mask, reference_mask=ref_mask)
+    if params.source_metadata is not None:
+        decision = route_pair(src_gray, ref_gray, params.source_metadata, params.reference_metadata)
         routing = decision.model_dump(mode="json")
         selected = decision.selected_engine
     else:
-        selected = "sift_flann"
-        routing = {"selected_engine": selected, "rationales": ["insufficient telemetry", "Bounded SIFT/FLANN image-only fallback; no GSD or incidence invented."]}
+        selected = "superpoint_lightglue"
+        routing = {"selected_engine": selected, "rationales": ["Telemetry absent; conservatively use learned matching."]}
     if params.engine != "auto":
         selected = params.engine
         routing["explicit_engine_override"] = selected
     stage(30, "conditioning")
-    src_conditioned, ref_conditioned = apply_wallis_filter(src_gray, mask=src_mask), apply_wallis_filter(ref_gray, mask=ref_mask)
+    src_conditioned, ref_conditioned = apply_wallis_filter(src_gray), apply_wallis_filter(ref_gray)
     stage(40, "matching")
     with _inference_lock:
-        matches = matcher_for(selected).match(src_conditioned, ref_conditioned, mask_src=src_mask, mask_ref=ref_mask)
+        matches = matcher_for(selected).match(src_conditioned, ref_conditioned)
     raw_count = len(matches)
     matches = refine_matches(matches, src_conditioned, ref_conditioned)
-    keep = np.ones(len(matches), dtype=bool)
-    for pts, mask in ((matches.pts_src, src_mask), (matches.pts_ref, ref_mask)):
-        safe = cv2.erode(mask.astype(np.uint8), np.ones((23, 23), np.uint8), borderType=cv2.BORDER_CONSTANT, borderValue=1)
-        xy = np.rint(pts).astype(int)
-        inside = (xy[:, 0] >= 0) & (xy[:, 0] < mask.shape[1]) & (xy[:, 1] >= 0) & (xy[:, 1] < mask.shape[0])
-        ok = np.zeros(len(pts), dtype=bool)
-        ok[inside] = safe[xy[inside, 1], xy[inside, 0]] > 0
-        keep &= ok
-    matches = MatchResult(matches.pts_src[keep], matches.pts_ref[keep], matches.confidences[keep], matches.execution_time_ms, matches.engine_name)
     stage(60, "filtering")
     try:
         filtered = filter_magsac_and_vsui(matches.pts_src, matches.pts_ref, matches.confidences,
@@ -191,20 +174,9 @@ def run_pipeline(directory: Path, raw_params: dict, progress) -> dict:
     }
     result = {"job_id": job_id, "status": "review_required", "progress_percent": 100,
               "metrics": metrics, "artifacts": {}, "routing": routing,
-              "schema_version": 2, "metadata": {"source": params.source_record.model_dump(mode="json"), "reference": params.reference_record.model_dump(mode="json")},
-              "tiles": {"source": params.source_tile.model_dump(), "reference": params.reference_tile.model_dump()},
-              "overlap_status": params.overlap_status,
-              "matching_mode": "map_grid_assisted" if params.overlap_status == "verified_grid_overlap" else "image_only",
-              "independent_ground_validation": False,
               "image_dimensions": {"source": {"width": source.shape[1], "height": source.shape[0]},
                                    "reference": {"width": reference.shape[1], "height": reference.shape[0]}},
               "review_reasons": list(filtered.rejection_reasons)}
-    result["coordinate_transforms"] = {}
-    for name, record, tile in (("source", params.source_record, params.source_tile), ("reference", params.reference_record, params.reference_tile)):
-        original = record.lineage.get("full_image_origin", [0, 0])
-        result["coordinate_transforms"][name] = {"tile_to_full_scene": [[1,0,tile.x+original[0]],[0,1,tile.y+original[1]],[0,0,1]], "convention": "zero-based pixel centers"}
-    if params.overlap_status == "unknown":
-        result["review_reasons"].append("Overlap unknown: explicit tile image-only matching requires visual review; no lunar ground accuracy established")
     if metrics["inlier_ratio"] < 0.70:
         result["review_reasons"].append("Geometric inliers / original feature matches is below 70% after refinement")
     if not filtered.accepted or metrics["inlier_ratio"] < 0.70:
@@ -214,8 +186,6 @@ def run_pipeline(directory: Path, raw_params: dict, progress) -> dict:
             projected = cv2.perspectiveTransform(pts[:, None], filtered.homography)[:, 0]
             metrics["rmse_px"] = float(np.sqrt(np.mean(np.sum((projected - matches.pts_ref[filtered.inlier_mask])**2, axis=1))))
         metrics["rmse_basis"] = "rejected_homography_consensus_diagnostic"
-        result["artifacts"] = {"dossier_url": f"/api/v1/artifacts/{job_id}_dossier.json", "georeferenced": False}
-        write_dossier(directory / "artifacts", result)
         return result
 
     stage(75, "tps_alignment")
@@ -230,14 +200,10 @@ def run_pipeline(directory: Path, raw_params: dict, progress) -> dict:
     metrics.update(rmse_px=rmse, fitting_rmse_px=warp.fitting_rmse_px,
                    validation_matches=int(validation.sum()),
                    rmse_basis="withheld_feature_correspondences" if validated else "fitting_only")
-    result["status"] = quality_status(rmse, filtered.vsui, validated=validated and params.overlap_status != "unknown")
+    result["status"] = quality_status(rmse, filtered.vsui, validated=validated)
     if rmse > 0.5:
         result["review_reasons"].append(f"RMSE {rmse:.6f} px exceeds 0.50 px")
-    # Bilinear support must be entirely valid; no interpolation across nulls.
-    map_x, map_y = warp.build_remap(reference.shape[:2])
-    aligned = cv2.remap(np.where(src_mask, source, 0).astype(np.float64), map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    support = cv2.remap(src_mask.astype(np.float32), map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    aligned_mask = (support >= 1 - 1e-6) & ref_mask & np.isfinite(aligned)
+    aligned = warp.warp(source, reference.shape[:2])
     residuals = np.linalg.norm(warp.forward(filtered.pts_src) - filtered.pts_ref, axis=1)
     ids = [f"LG-{i+1:04d}" for i in range(filtered.retained_count)]
     result["tie_points"] = [
@@ -248,18 +214,38 @@ def run_pipeline(directory: Path, raw_params: dict, progress) -> dict:
     ]
     stage(90, "export")
     output = directory / "artifacts"
-    write_bundle(output, aligned, aligned_mask, result, params, filtered.tie_points, residuals, filtered.confidences, ids)
+    output.mkdir(exist_ok=True)
+    if params.reference_grid:
+        # OpenCV BGR -> standard TIFF RGB; original band values are preserved.
+        raster = aligned
+        if aligned.ndim == 3:
+            raster = cv2.cvtColor(aligned, cv2.COLOR_BGRA2RGBA if aligned.shape[2] == 4 else cv2.COLOR_BGR2RGB)
+        export_registration_bundle(
+            raster, output, **params.reference_grid.model_dump(), tie_points=filtered.tie_points,
+            residuals_px=residuals, confidences=filtered.confidences, point_ids=ids,
+            job_id=job_id, rmse_px=rmse, vsui=filtered.vsui, inlier_ratio=metrics["inlier_ratio"],
+            rmse_basis=metrics["rmse_basis"], job_telemetry=params.model_dump(mode="json"),
+            pipeline_timeline=[{"stage": a["stage"], "duration_ms": (b["elapsed_seconds"] - a["elapsed_seconds"]) * 1000}
+                               for a, b in zip(timeline, timeline[1:])],
+        )
+    else:
+        if not cv2.imwrite(str(output / "registered_output.tif"), aligned):
+            raise ValueError("Registered TIFF encoding failed")
+        with (output / "tiepoints.csv").open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(CSV_COLUMNS)
+            for identifier, tie, residual, score in zip(ids, filtered.tie_points, residuals, filtered.confidences):
+                writer.writerow([identifier, *tie, "", "", residual, score])
+        (output / "registration_dossier.json").write_text(json.dumps(
+            {"job_id": job_id, "georeferenced": False, "metrics": metrics,
+             "job_telemetry": params.model_dump(mode="json"), "pipeline_timeline": timeline}, allow_nan=False), encoding="utf-8")
     result["artifacts"] = {
-        "registered_preview_base64": preview_png(stretch(aligned, aligned_mask)),
+        "registered_preview_base64": preview_png(aligned),
         "geotiff_download_url": f"/api/v1/artifacts/{job_id}.tif",
         "tie_points_csv_url": f"/api/v1/artifacts/{job_id}_tiepoints.csv",
         "dossier_url": f"/api/v1/artifacts/{job_id}_dossier.json",
-        "georeferenced": params.reference_record.grid is not None,
+        "georeferenced": params.reference_grid is not None,
     }
-    result["source_preview"], result["reference_preview"] = preview_png(src_gray), preview_png(ref_gray)
+    result["source_preview"], result["reference_preview"] = preview_png(source), preview_png(reference)
     metrics["runtime_seconds"] = perf_counter() - started
-    stage(99, "finalizing")
-    # Keep image blobs out of the portable provenance dossier.
-    write_dossier(output, {**result, "source_preview": None, "reference_preview": None,
-        "artifacts": {**result["artifacts"], "registered_preview_base64": None}, "pipeline_timeline": timeline})
     return result

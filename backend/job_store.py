@@ -7,8 +7,6 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-import shutil
-from uuid import uuid4
 
 JOB_ID = re.compile(r"job_lunar_[0-9a-f]{32}\Z")
 TERMINAL = {"complete", "review_required", "failed"}
@@ -24,37 +22,6 @@ class JobStore:
                 job_id TEXT PRIMARY KEY, status TEXT NOT NULL, progress INTEGER NOT NULL,
                 stage TEXT NOT NULL, updated REAL NOT NULL, params TEXT NOT NULL,
                 result TEXT, error TEXT)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS reservations (
-                token TEXT PRIMARY KEY, bytes INTEGER NOT NULL, created REAL NOT NULL)""")
-
-    def reserve(self, settings):
-        """Cross-process admission before multipart spooling; conservative disk reservation."""
-        # Multipart spool + isolated staged copy coexist until the request ends.
-        amount = 2 * settings.max_request_bytes + settings.max_tile_pixels * 64
-        with closing(self.connect()) as db, db:
-            db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('SELECT bytes FROM reservations').fetchall()
-            if len(rows) >= settings.max_active_jobs:
-                raise ValueError('Upload/inspection capacity reached; retry after current request finishes')
-            used = 0
-            for index, path in enumerate(self.root.rglob('*')):
-                if index > 100000:
-                    raise ValueError('Storage file-count quota reached; operator cleanup required')
-                if path.is_file():
-                    try:
-                        used += path.stat().st_size
-                    except FileNotFoundError:
-                        pass  # A completed worker may have just removed its staging file.
-            reserved = sum(r['bytes'] for r in rows)
-            if used + reserved + amount > settings.max_storage_bytes or shutil.disk_usage(self.root).free < settings.min_free_bytes + reserved + amount:
-                raise ValueError('Staging disk quota/free-space reserve exhausted; operator cleanup required')
-            token = uuid4().hex
-            db.execute('INSERT INTO reservations VALUES (?, ?, ?)', (token, amount, time.time()))
-            return token
-
-    def release(self, token):
-        with closing(self.connect()) as db, db:
-            db.execute('DELETE FROM reservations WHERE token=?', (token,))
 
     def connect(self):
         db = sqlite3.connect(self.database, timeout=30)
@@ -69,12 +36,9 @@ class JobStore:
             raise KeyError(job_id)
         return path
 
-    def create(self, job_id: str, params: dict, max_active=None):
+    def create(self, job_id: str, params: dict):
         self.directory(job_id)
         with closing(self.connect()) as db, db:
-            db.execute('BEGIN IMMEDIATE')
-            if max_active is not None and db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','processing')").fetchone()[0] >= max_active:
-                raise ValueError('Active job quota reached; wait or cancel a job')
             db.execute("INSERT INTO jobs VALUES (?, 'queued', 0, 'queued', ?, ?, NULL, NULL)",
                        (job_id, time.time(), json.dumps(params, allow_nan=False)))
 
@@ -98,23 +62,10 @@ class JobStore:
                 stage='ingestion', updated=? WHERE job_id=? AND status='queued'""",
                 (time.time(), job_id)).rowcount == 1
 
-    def cancel(self, job_id: str):
-        with closing(self.connect()) as db, db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT status FROM jobs WHERE job_id=?', (job_id,)).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            previous = row['status']
-            if previous not in TERMINAL:
-                db.execute("UPDATE jobs SET status='failed', progress=100, stage='cancelled', updated=?, error='Registration cancelled by user' WHERE job_id=?", (time.time(),job_id))
-            return previous
-
     def progress(self, job_id: str, percent: int, stage: str):
         with closing(self.connect()) as db, db:
-            changed = db.execute("""UPDATE jobs SET progress=?, stage=?, updated=?
+            db.execute("""UPDATE jobs SET progress=?, stage=?, updated=?
                 WHERE job_id=? AND status='processing'""", (percent, stage, time.time(), job_id))
-            if changed.rowcount != 1:
-                raise ValueError('Registration cancelled or expired')
 
     def finish(self, job_id: str, status: str, result: dict | None = None, error: str | None = None):
         if status not in TERMINAL:

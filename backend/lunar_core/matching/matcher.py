@@ -110,7 +110,7 @@ class BaseMatcher(ABC):
     engine_name: ClassVar[str]
 
     @abstractmethod
-    def match(self, image_src: np.ndarray, image_ref: np.ndarray, *, mask_src=None, mask_ref=None) -> MatchResult:
+    def match(self, image_src: np.ndarray, image_ref: np.ndarray) -> MatchResult:
         """Return correspondences; insufficient texture yields correctly shaped empties."""
 
     def __call__(self, image_src: np.ndarray, image_ref: np.ndarray) -> MatchResult:
@@ -153,20 +153,12 @@ class SIFTMatcher(BaseMatcher):
                 accepted[best.queryIdx] = (best.trainIdx, 1.0 - best.distance / second.distance)
         return accepted
 
-    def match(self, image_src: np.ndarray, image_ref: np.ndarray, *, mask_src=None, mask_ref=None) -> MatchResult:
+    def match(self, image_src: np.ndarray, image_ref: np.ndarray) -> MatchResult:
         started = perf_counter()
         src = np.rint(_gray_float(image_src) * 255).astype(np.uint8)
         ref = np.rint(_gray_float(image_ref) * 255).astype(np.uint8)
-        def detect(image, mask):
-            allowed = None if mask is None else mask.astype(np.uint8) * 255
-            keys, descriptors = self.detector.detectAndCompute(image, allowed)
-            if mask is not None and descriptors is not None:
-                distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
-                keep = [i for i, k in enumerate(keys) if distance[round(k.pt[1]), round(k.pt[0])] >= max(12, k.size * 3)]
-                keys, descriptors = [keys[i] for i in keep], descriptors[keep]
-            return keys, descriptors
-        key_src, desc_src = detect(src, mask_src)
-        key_ref, desc_ref = detect(ref, mask_ref)
+        key_src, desc_src = self.detector.detectAndCompute(src, None)
+        key_ref, desc_ref = self.detector.detectAndCompute(ref, None)
         if desc_src is None or desc_ref is None or len(desc_ref) < 2:
             return self._empty(started)
         if self.mutual_check and len(desc_src) < 2:
@@ -267,7 +259,7 @@ class LightGlueMatcher(BaseMatcher):
         elif self.device.type == "mps":
             self._torch.mps.synchronize()
 
-    def match(self, image_src: np.ndarray, image_ref: np.ndarray, *, mask_src=None, mask_ref=None) -> MatchResult:
+    def match(self, image_src: np.ndarray, image_ref: np.ndarray) -> MatchResult:
         self._synchronize()
         started = perf_counter()
         src, ref = _gray_float(image_src), _gray_float(image_ref)
@@ -280,15 +272,6 @@ class LightGlueMatcher(BaseMatcher):
             features = [self.extractor.extract(
                 torch.from_numpy(a)[None].to(self.device), resize=None,
             ) for a in (src, ref)]
-            # Remove masked SuperPoint candidates BEFORE descriptor matching.
-            # Erosion excludes the network's local receptive field around nulls.
-            for f, mask in zip(features, (mask_src, mask_ref)):
-                if mask is not None:
-                    safe = cv2.erode(mask.astype(np.uint8), np.ones((65, 65), np.uint8), borderType=cv2.BORDER_CONSTANT, borderValue=1)
-                    coords = f["keypoints"][0].round().long()
-                    allowed = torch.from_numpy(safe).to(self.device)[coords[:, 1], coords[:, 0]].bool()
-                    for key in ("keypoints", "keypoint_scores", "descriptors"):
-                        f[key] = f[key][:, allowed]
             if any(f["keypoints"].shape[1] == 0 for f in features):
                 self._synchronize()
                 return self._empty(started)

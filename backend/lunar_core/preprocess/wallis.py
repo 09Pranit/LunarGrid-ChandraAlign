@@ -108,7 +108,6 @@ def apply_wallis_filter(
     contrast: float = 0.80,
     brightness: float = 0.20,
     tile_size: int = 1024,
-    mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Apply the exact local Wallis equation and return clipped uint8 output.
 
@@ -133,21 +132,6 @@ def apply_wallis_filter(
     if not 0.1 <= brightness <= 0.3:
         raise ValueError("brightness must be in [0.1, 0.3]")
 
-    if mask is not None:
-        if mask.shape != image.shape or mask.dtype != bool:
-            raise ValueError("Wallis mask must be boolean and match image")
-        values = image.astype(np.float64)
-        weights = mask.astype(np.float64)
-        kernel = (window_size, window_size)
-        mass = cv2.boxFilter(weights, -1, kernel, normalize=False)
-        mass = np.maximum(mass, 1)
-        mean = cv2.boxFilter(values * weights, -1, kernel, normalize=False) / mass
-        variance = cv2.boxFilter(values * values * weights, -1, kernel, normalize=False) / mass - mean * mean
-        std = np.sqrt(np.maximum(variance, _STD_FLOOR**2))
-        gain = (contrast * target_std) / (contrast * std + (1 - contrast) * target_std)
-        output = np.clip((values - mean) * gain + brightness * target_mean + (1 - brightness) * mean, 0, 255).astype(np.uint8)
-        output[~mask] = 0
-        return output
     output = np.empty(image.shape, dtype=np.uint8)
     for patch, destination, core in _tiles(image, window_size, tile_size):
         values, mean, std = _local_stats(patch, window_size)

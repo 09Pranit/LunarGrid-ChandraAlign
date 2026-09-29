@@ -187,8 +187,8 @@ def test_invalid_geometry_is_rejected(overrides):
 
 
 def test_router_rejects_nonfinite_phase1_gsd(image):
-    # Ingestion now rejects non-finite telemetry before the router.
-    with pytest.raises(ValueError, match="finite"):
+    # Phase 1 allows positive infinity for GSD; the router must validate it.
+    with pytest.raises(ValueError, match="gsd_src must be a finite"):
         route_pair(image, image, telemetry(gsd=np.inf), telemetry())
 
 
