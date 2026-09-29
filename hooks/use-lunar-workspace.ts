@@ -1,6 +1,25 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { DEMO_IMAGE, DEMO_METRICS, DEMO_POINTS, LOG_MESSAGES, PIPELINE, downloadFile, tiePointCSV, type TiePoint } from '@/lib/lunar-data';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  DEMO_IMAGE,
+  DEMO_METRICS,
+  DEMO_POINTS,
+  LOG_MESSAGES,
+  PIPELINE,
+  downloadFile,
+  tiePointCSV,
+  type TiePoint,
+} from '@/lib/lunar-data';
+import {
+  inspectImage,
+  DEFAULT_TILE,
+  BROWSER_UPLOAD_LIMIT,
+  LARGE_RASTER_HELP,
+  type Inspection,
+  type MetadataMode,
+  type Side,
+  type Tile,
+} from '@/lib/ingestion';
 import type { ViewMode } from '@/components/lunar-viewer';
 import { registerJob, downloadArtifact, type RegistrationResult } from '@/lib/registration-api';
 type Fields = { sensor:string; gsd:string; sun:string; incidence:string; emission:string };

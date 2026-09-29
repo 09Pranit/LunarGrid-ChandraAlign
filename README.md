@@ -19,6 +19,7 @@ The workspace opens empty. Select **Load demo data** to populate the illustrativ
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -r backend\requirements.txt
+$env:CELERY_TASK_ALWAYS_EAGER = 'true' # local development only; use Celery in deployment
 .venv\Scripts\uvicorn main:app --app-dir backend --reload --port 8000
 ```
 

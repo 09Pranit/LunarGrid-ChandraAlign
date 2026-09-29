@@ -1,15 +1,46 @@
+/* eslint-disable next/no-img-element -- Local user previews require blob/data URLs; this workspace is rendered by Vite. */
 'use client';
 import { useState } from 'react';
-import { Activity, ArrowRight, CheckCircle2, ChevronDown, CircleDot, Download, FileImage, Gauge, Layers3, Moon, Play, RotateCcw, Satellite, Settings2, ShieldCheck, UploadCloud, X, Crosshair } from 'lucide-react';
+import {
+  Activity,
+  ArrowRight,
+  ChevronDown,
+  CircleDot,
+  Download,
+  Gauge,
+  Moon,
+  Play,
+  RotateCcw,
+  Satellite,
+  Settings2,
+  ShieldCheck,
+  X,
+  Crosshair,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { NativeSelect } from '@/components/ui/native-select';
-import { Progress, ProgressLabel, ProgressValue } from '@/components/ui/progress';
+import {
+  Progress,
+  ProgressLabel,
+  ProgressValue,
+} from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { LunarViewer, type ViewMode } from '@/components/lunar-viewer';
 import { DEMO_IMAGE, PIPELINE } from '@/lib/lunar-data';
+import { ImageIngestionCard } from '@/components/image-ingestion-card';
 import { useLunarWorkspace } from '@/hooks/use-lunar-workspace';
 export default function Home(){
   const w=useLunarWorkspace();
@@ -48,4 +79,3 @@ export default function Home(){
     <Dialog open={w.exportNotice} onOpenChange={w.setExportNotice}><DialogContent><DialogTitle>Registered GeoTIFF</DialogTitle><DialogDescription>A georeferenced raster has not been returned by the backend. This preview has no verified lunar coordinate system.</DialogDescription><p>Connect a backend that supplies a registered GeoTIFF to enable this export. Tie Points CSV and the Registration Report are available now{simulated?' and explicitly marked as simulated':''}.</p><Button onClick={()=>w.setExportNotice(false)}>Understood</Button></DialogContent></Dialog>
   </main>;
 }
-function Metric({icon,label,value,detail}:{icon:React.ReactNode;label:string;value:string;detail?:string}){return <div className="metric"><div className="metric-icon">{icon}</div><div><span>{label}</span>{detail&&<small>{detail}</small>}</div><strong>{value}</strong></div>;}
