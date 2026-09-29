@@ -1,5 +1,6 @@
 # dependencies
 /node_modules
+/.pnpm-store/
 /.pnp
 .pnp.*
 .yarn/*
@@ -19,6 +20,17 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+.npmrc
+.pypirc
+.netrc
+credentials*.json
+service-account*.json
 
 # debug
 npm-debug.log*
@@ -30,6 +42,10 @@ yarn-error.log*
 .env*
 .openai
 
+# local testing notes and workstation-specific walkthroughs
+/MANUAL_TEST_PLAN.md
+/walkthrough_[Pp]hase*.md
+
 # deployment and generated files
 .vercel
 next-env.d.ts
@@ -38,6 +54,7 @@ next-env.d.ts
 /outputs/
 /work/
 /.venv/
+/.venv-phase2/
 __pycache__/
 *.pyc
 *.pyo
