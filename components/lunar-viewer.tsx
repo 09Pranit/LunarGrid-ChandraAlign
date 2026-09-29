@@ -7,8 +7,9 @@ import type { TiePoint } from '@/lib/lunar-data';
 
 export type ViewMode = 'comparison' | 'tie-points' | 'overlay' | 'registered';
 type Raster = { image: HTMLImageElement; pixels: ImageData };
-type Props = { mode: ViewMode; source: string; reference: string; registered: string | null; simulated: boolean; points: TiePoint[]; selected: TiePoint | null; onSelect: (p: TiePoint) => void };
-export function LunarViewer({ mode, source, reference, registered, simulated, points, selected, onSelect }: Props) {
+type Dimensions = { source: { width: number; height: number }; reference: { width: number; height: number } };
+type Props = { mode: ViewMode; source: string; reference: string; registered: string | null; simulated: boolean; points: TiePoint[]; selected: TiePoint | null; onSelect: (p: TiePoint) => void; dimensions?: Dimensions };
+export function LunarViewer({ mode, source, reference, registered, simulated, points, selected, onSelect, dimensions }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const surface = useRef<HTMLDivElement>(null);
   const [rasters, setRasters] = useState<Record<string, Raster>>({});
@@ -22,6 +23,7 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
   const [error, setError] = useState('');
   const drag = useRef<{ kind: 'split' | 'pan'; x: number; y: number; px: number; py: number } | null>(null);
   const aligned = registered || reference;
+  const empty = !source && !reference;
   useEffect(() => {
     let live = true; setError(''); setRasters({}); setZoom(1); setPan({ x: 0, y: 0 });
     for (const url of new Set([source, reference, aligned])) {
@@ -46,7 +48,7 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
     observer.observe(surface.current); return () => observer.disconnect();
   }, []);
   const refRaster = rasters[reference] || rasters[source];
-  const width = refRaster?.image.naturalWidth || 1300, height = refRaster?.image.naturalHeight || 1300;
+  const width = dimensions?.reference.width || refRaster?.image.naturalWidth || 1300, height = dimensions?.reference.height || refRaster?.image.naturalHeight || 1300;
   const frameWidth = mode === 'tie-points' ? size.w / 2 : size.w;
   const scale = Math.min(frameWidth / width, size.h / height) * zoom;
   const origin = { x: (frameWidth - width * scale) / 2 + pan.x, y: (size.h - height * scale) / 2 + pan.y };
@@ -60,7 +62,8 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
       ctx.save(); ctx.beginPath(); ctx.rect(offset, 0, frameWidth, size.h); ctx.clip();
       ctx.translate(origin.x + offset, origin.y); ctx.scale(scale, scale);
       if (simulated && isSource) { ctx.translate(18, -12); ctx.filter = 'brightness(0.86) contrast(1.08)'; }
-      ctx.drawImage(raster.image, 0, 0); ctx.restore();
+      const original = isSource ? dimensions?.source : dimensions?.reference;
+      ctx.drawImage(raster.image, 0, 0, original?.width || raster.image.naturalWidth, original?.height || raster.image.naturalHeight); ctx.restore();
     };
     if (mode === 'tie-points') {
       draw(source, 0, true); draw(reference, frameWidth);
@@ -81,7 +84,7 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
     } else if (mode === 'registered') draw(aligned);
     else if (mode === 'overlay') { draw(reference); ctx.globalAlpha = opacity / 100; draw(source, 0, true); ctx.globalAlpha = 1; }
     else { draw(aligned); ctx.save(); ctx.beginPath(); ctx.rect(0, 0, size.w * reveal / 100, size.h); ctx.clip(); draw(source, 0, true); ctx.restore(); }
-  }, [rasters, size, scale, origin.x, origin.y, frameWidth, mode, source, reference, aligned, simulated, reveal, opacity, points, selected]);
+  }, [rasters, size, scale, origin.x, origin.y, frameWidth, mode, source, reference, aligned, simulated, reveal, opacity, points, selected, dimensions]);
   const position = (e: React.PointerEvent) => { const r = surface.current!.getBoundingClientRect(); return { x: e.clientX-r.left, y: e.clientY-r.top }; };
   const reset = () => { setZoom(1); setPan({ x:0, y:0 }); setReveal(50); setOpacity(50); setHover('Move over image to inspect pixels'); };
   const move = (e: React.PointerEvent) => {
@@ -91,7 +94,9 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
     const x = Math.floor((p.x-side-origin.x)/scale), y = Math.floor((p.y-origin.y)/scale);
     const isSource = mode === 'tie-points' ? !side : mode === 'comparison' && p.x < size.w*reveal/100;
     const url = isSource ? source : mode === 'tie-points' || mode === 'overlay' ? reference : aligned;
-    const raster = rasters[url]; const sx = x-(simulated&&isSource?18:0), sy = y+(simulated&&isSource?12:0);
+    const raster = rasters[url]; const original = isSource ? dimensions?.source : dimensions?.reference;
+    const sx = Math.floor((x-(simulated&&isSource?18:0)) * (raster?.pixels.width || 1) / (original?.width || raster?.pixels.width || 1));
+    const sy = Math.floor((y+(simulated&&isSource?12:0)) * (raster?.pixels.height || 1) / (original?.height || raster?.pixels.height || 1));
     if (!raster || sx<0 || sy<0 || sx>=raster.pixels.width || sy>=raster.pixels.height) { setHover('Outside raster extent'); return; }
     const i = (sy*raster.pixels.width+sx)*4; const dn = Math.round(.299*raster.pixels.data[i]+.587*raster.pixels.data[i+1]+.114*raster.pixels.data[i+2]);
     setHover(`${isSource?'SRC':'REF'}  X ${x}  Y ${y} px  ·  ${dn} / 255${mode==='overlay'?' · reference sample':''}`);
@@ -108,19 +113,20 @@ export function LunarViewer({ mode, source, reference, registered, simulated, po
     if(drag.current) e.currentTarget.setPointerCapture(e.pointerId);
   };
   return <>
-    <div className="viewer-toolbar"><div className="tool-group"><Button variant="ghost" size="sm" aria-label="Zoom out" onClick={()=>setZoom(z=>Math.max(.25,z/1.25))}><Minus/></Button><span className="zoom-value">{Math.round(zoom*100)}%</span><Button variant="ghost" size="sm" aria-label="Zoom in" onClick={()=>setZoom(z=>Math.min(8,z*1.25))}><Plus/></Button><i/><Button variant={panMode?'secondary':'ghost'} size="sm" aria-pressed={panMode} onClick={()=>setPanMode(!panMode)}><Hand/> Pan</Button><Button variant="ghost" size="sm" onClick={()=>{setZoom(1);setPan({x:0,y:0});}}><Maximize/> Fit</Button><Button variant="ghost" size="sm" onClick={reset}><RotateCcw/> Reset</Button></div><span className="raster-meta">{width} × {height} px · grayscale preview</span></div>
+    <div className="viewer-toolbar"><div className="tool-group"><Button variant="ghost" size="sm" aria-label="Zoom out" disabled={empty} onClick={()=>setZoom(z=>Math.max(.25,z/1.25))}><Minus/></Button><span className="zoom-value">{Math.round(zoom*100)}%</span><Button variant="ghost" size="sm" aria-label="Zoom in" disabled={empty} onClick={()=>setZoom(z=>Math.min(8,z*1.25))}><Plus/></Button><i/><Button variant={panMode?'secondary':'ghost'} size="sm" aria-pressed={panMode} disabled={empty} onClick={()=>setPanMode(!panMode)}><Hand/> Pan</Button><Button variant="ghost" size="sm" disabled={empty} onClick={()=>{setZoom(1);setPan({x:0,y:0});}}><Maximize/> Fit</Button><Button variant="ghost" size="sm" disabled={empty} onClick={reset}><RotateCcw/> Reset</Button></div><span className="raster-meta">{empty?'No raster loaded':`${width} × ${height} px · grayscale preview`}</span></div>
     <div ref={surface} className={`comparison scientific-viewer ${panMode?'panning':''}`} onPointerDown={down} onPointerMove={move} onPointerUp={()=>{drag.current=null;}} onPointerCancel={()=>{drag.current=null;}} onLostPointerCapture={()=>{drag.current=null;}}>
       <canvas ref={canvasRef} className="image-layer" aria-label={`${mode} lunar imagery; use toolbar to zoom and pan`}/>
-      {(!source || !reference)&&<div className="viewer-message">TIFF / IMG previews require the processing service. Run Registration with a connected backend.</div>}
+      {empty&&<div className="viewer-message">Load source and reference images, or choose Load demo data.</div>}
+      {!empty&&(!source || !reference)&&<div className="viewer-message">TIFF / IMG previews require the processing service. Run Registration with a connected backend.</div>}
       {source&&reference&&!Object.keys(rasters).length&&!error&&<div className="viewer-message">Loading lunar raster…</div>}
       {error&&<div className="viewer-message" role="alert">{error}</div>}
-      {mode==='comparison'&&<div className="reveal-line" style={{left:`${reveal}%`}}><span/></div>}
-      <span className="image-tag left-tag">{mode==='registered'?'REGISTERED':mode==='overlay'?'SOURCE + REFERENCE':'SOURCE'}</span>
-      {mode!=='registered'&&mode!=='overlay'&&<span className="image-tag right-tag">{mode==='tie-points'||!registered?'REFERENCE':'REGISTERED'}</span>}
-      <span className="preview-tag">{simulated?'SIMULATED ALIGNMENT':registered?'BACKEND PREVIEW':'INPUT PREVIEW'}</span>
+      {!empty&&mode==='comparison'&&<div className="reveal-line" style={{left:`${reveal}%`}}><span/></div>}
+      {!empty&&<span className="image-tag left-tag">{mode==='registered'?'REGISTERED':mode==='overlay'?'SOURCE + REFERENCE':'SOURCE'}</span>}
+      {!empty&&mode!=='registered'&&mode!=='overlay'&&<span className="image-tag right-tag">{mode==='tie-points'||!registered?'REFERENCE':'REGISTERED'}</span>}
+      {!empty&&<span className="preview-tag">{simulated?'SIMULATED ALIGNMENT':registered?'BACKEND PREVIEW':'INPUT PREVIEW'}</span>}
     </div>
     <div className="coordinate-bar"><Crosshair/><output>{hover}</output><span>Pixel coordinates · origin top left</span></div>
-    {mode==='comparison'&&<div className="viewer-controls"><span>Source</span><Slider aria-label="Source registered comparison" value={[reveal]} min={0} max={100} onValueChange={v=>setReveal(Array.isArray(v)?v[0]:v)}/><span>Registered</span></div>}
+    {!empty&&mode==='comparison'&&<div className="viewer-controls"><span>Source</span><Slider aria-label="Source registered comparison" value={[reveal]} min={0} max={100} onValueChange={v=>setReveal(Array.isArray(v)?v[0]:v)}/><span>Registered</span></div>}
     {mode==='overlay'&&<div className="viewer-controls"><span>Reference</span><Slider aria-label="Source overlay opacity" value={[opacity]} min={0} max={100} onValueChange={v=>setOpacity(Array.isArray(v)?v[0]:v)}/><span>Source {opacity}%</span></div>}
     {mode==='tie-points'&&<div className="viewer-legend"><span className="accepted">○ Accepted</span><span className="rejected">× Rejected</span><span>Click either endpoint to inspect a match.</span></div>}
     {mode==='registered'&&<div className="viewer-legend">Aligned to the reference image grid · {simulated?'demonstration output':'backend output'}</div>}

@@ -1,26 +1,10 @@
-"""PDS4 XML label parser with orbital geometry computations.
+"""Bounded PDS4 telemetry parser; missing fields remain None.
 
-Extracts telemetry from NASA/ISRO Planetary Data System v4 labels
-and maps them to strongly-typed Pydantic v2 models.
-
-Supported missions
-──────────────────
-    Chandrayaan-2 : OHRC (0.25 m), TMC-2 (5 m), IIRS (80 m)
-    LRO           : LROC NAC
-
-Design decisions
-────────────────
-    • Namespace-agnostic tag matching via local-name lookup.
-    • ``lazy_load=True`` uses ``iterparse`` for forward-only streaming.
-    • All ValidationErrors from Pydantic are caught and re-raised as
-      ``InvalidTelemetryError`` so callers never see framework internals.
-    • 32-bit float precision is enforced at the raster layer (future phases);
-      metadata floats remain 64-bit for coordinate precision.
-
-References
-──────────
-    PDS4 Information Model : https://pds.nasa.gov/datastandards/
-    IAU 2015 Lunar Radius  : 1 737 400 m
+Known mission tag aliases are read literally, without inferred instrument GSD
+or nadir defaults. XML DTDs/entities are forbidden. Acquisition bounding boxes
+are coarse summaries, never pixel-to-ground transforms. File association and
+raster descriptors are validated in pds4_raster.py; standalone telemetry parsing
+does not establish which uploaded image a label describes.
 """
 
 from __future__ import annotations
@@ -70,7 +54,7 @@ class LunarBoundingBox(BaseModel):
     Longitude : [-360, 360] (positive-East, allows antimeridian wrap)
     """
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "allow_inf_nan": False}
 
     lat_min: float = Field(..., description="Southern latitude bound (°)")
     lat_max: float = Field(..., description="Northern latitude bound (°)")
@@ -88,10 +72,8 @@ class LunarBoundingBox(BaseModel):
             raise InvalidTelemetryError(
                 f"lat_min ({self.lat_min}°) must be ≤ lat_max ({self.lat_max}°)"
             )
-        if self.lon_min > self.lon_max:
-            raise InvalidTelemetryError(
-                f"lon_min ({self.lon_min}°) must be ≤ lon_max ({self.lon_max}°)"
-            )
+        if abs(self.lon_min) > 360 or abs(self.lon_max) > 360:
+            raise InvalidTelemetryError("Longitude outside [-360,360]")
         return self
 
     def spherical_area(self, radius: float = MOON_RADIUS_M) -> float:
@@ -104,7 +86,7 @@ class LunarBoundingBox(BaseModel):
         """
         lat1 = math.radians(self.lat_min)
         lat2 = math.radians(self.lat_max)
-        dlon = math.radians(abs(self.lon_max - self.lon_min))
+        dlon = math.radians((self.lon_max - self.lon_min) % 360 if abs(self.lon_max - self.lon_min) < 360 else 360)
         return radius * radius * abs(math.sin(lat2) - math.sin(lat1)) * dlon
 
 
@@ -114,7 +96,7 @@ class LunarTelemetryMetadata(BaseModel):
     All angles in degrees, all distances in metres.
     """
 
-    model_config = {"frozen": True}
+    model_config = {"frozen": True, "allow_inf_nan": False}
 
     product_id: Optional[str] = Field(
         None, description="PDS4 logical identifier or product ID"
@@ -122,15 +104,15 @@ class LunarTelemetryMetadata(BaseModel):
     instrument: Optional[str] = Field(
         None, description="Instrument name (OHRC, TMC-2, IIRS, NAC)"
     )
-    gsd_meters: float = Field(..., gt=0.0, description="Ground Sample Distance (m)")
-    incidence_angle_deg: float = Field(
-        ..., ge=0.0, le=90.0, description="Solar incidence angle (°)"
+    gsd_meters: float | None = Field(None, gt=0.0, description="Ground Sample Distance (m)")
+    incidence_angle_deg: float | None = Field(
+        None, ge=0.0, le=90.0, description="Solar incidence angle (°)"
     )
-    emission_angle_deg: float = Field(
-        ..., ge=0.0, le=90.0, description="Sensor emission angle (°)"
+    emission_angle_deg: float | None = Field(
+        None, ge=0.0, le=90.0, description="Sensor emission angle (°)"
     )
-    solar_azimuth_deg: float = Field(
-        ..., ge=0.0, lt=360.0, description="Solar azimuth angle (°)"
+    solar_azimuth_deg: float | None = Field(
+        None, ge=0.0, lt=360.0, description="Solar azimuth angle (°)"
     )
     bounding_box: Optional[LunarBoundingBox] = None
     pixel_resolution_m: Optional[float] = Field(
@@ -184,24 +166,17 @@ def compute_bbox_overlap(
     """
     lat_lo = max(bbox_src.lat_min, bbox_ref.lat_min)
     lat_hi = min(bbox_src.lat_max, bbox_ref.lat_max)
-    lon_lo = max(bbox_src.lon_min, bbox_ref.lon_min)
-    lon_hi = min(bbox_src.lon_max, bbox_ref.lon_max)
-
-    if lat_lo >= lat_hi or lon_lo >= lon_hi:
+    if lat_lo >= lat_hi:
         return 0.0
-
-    inter = LunarBoundingBox(
-        lat_min=lat_lo, lat_max=lat_hi,
-        lon_min=lon_lo, lon_max=lon_hi,
-    )
-    a_i = inter.spherical_area(radius)
-    a_s = bbox_src.spherical_area(radius)
-    a_r = bbox_ref.spherical_area(radius)
-    denom = min(a_s, a_r)
-
-    if denom <= 0.0:
-        return 0.0
-    return float(np.clip(a_i / denom, 0.0, 1.0))
+    def intervals(box):
+        span = (box.lon_max - box.lon_min) % 360 if abs(box.lon_max - box.lon_min) < 360 else 360
+        start = box.lon_min % 360
+        end = start + span
+        return [(start, min(end,360))] + ([(0,end-360)] if end > 360 else [])
+    longitude = sum(max(0., min(b,d)-max(a,c)) for a,b in intervals(bbox_src) for c,d in intervals(bbox_ref))
+    area = radius**2 * abs(math.sin(math.radians(lat_hi))-math.sin(math.radians(lat_lo))) * math.radians(longitude)
+    denominator = min(bbox_src.spherical_area(radius),bbox_ref.spherical_area(radius))
+    return float(np.clip(area/denominator,0,1)) if denominator > 0 else 0.
 
 
 # ── XML Tag Mapping ──────────────────────────────────────────────────
@@ -212,8 +187,6 @@ _TAG_MAP: dict[str, str] = {
     # Ground Sample Distance
     "pixel_resolution":          "gsd",
     "ground_sampling_distance":  "gsd",
-    "map_resolution":            "gsd",
-    "map_scale":                 "gsd",
     "spatial_resolution":        "gsd",
     # Illumination & viewing angles
     "incidence_angle":           "incidence_angle",
@@ -242,7 +215,6 @@ _TAG_MAP: dict[str, str] = {
     # Identity
     "logical_identifier":        "product_id",
     "product_id":                "product_id",
-    "data_set_id":               "product_id",
     "instrument_name":           "instrument",
     "instrument_id":             "instrument",
 }
@@ -270,20 +242,18 @@ def _apply_unit(value: float, unit: Optional[str], field: str) -> float:
     """Convert a raw value to canonical units (metres / degrees)."""
     if unit is None:
         return value
-    u = unit.lower()
+    u = unit.lower().strip().replace(' ', '')
     if field == "gsd":
-        if "km" in u:
-            return value * 1_000.0
-        if "cm" in u:
-            return value * 0.01
-        if "mm" in u:
-            return value * 0.001
-    elif field in (
-        "incidence_angle", "emission_angle", "solar_azimuth",
-        "lat_min", "lat_max", "lon_min", "lon_max",
-    ):
-        if "rad" in u:
+        distances = {'m':1., 'km':1000., 'cm':.01, 'mm':.001}
+        base = u.removesuffix('/pixel').removesuffix('/px')
+        if base not in distances:
+            raise InvalidTelemetryError('Unsupported GSD units; require physical distance per pixel')
+        return value * distances[base]
+    if field in ("incidence_angle", "emission_angle", "solar_azimuth", "lat_min", "lat_max", "lon_min", "lon_max"):
+        if u in {'rad', 'radian', 'radians'}:
             return math.degrees(value)
+        if u not in {'deg', 'degree', 'degrees'}:
+            raise InvalidTelemetryError('Unsupported angular unit')
     return value
 
 
@@ -292,30 +262,30 @@ def _get_xml_root(
     *,
     lazy_load: bool = True,
 ) -> ET.Element:
-    """Obtain XML root element from path or raw bytes.
-
-    When *lazy_load* is ``True`` and *source* is a path, ``iterparse``
-    is used to stream through the document without holding every
-    intermediate node in memory.  For label files (typically < 1 MB)
-    the difference is negligible, but the pattern scales to multi-GB
-    combined labels in future phases.
-    """
+    """Parse at most 1 MiB with depth/node limits; lazy_load is a legacy no-op."""
     if isinstance(source, bytes):
-        return ET.fromstring(source)
-
-    path = Path(source)
-    if not path.exists():
-        raise FileNotFoundError(f"PDS4 label not found: {path}")
-
-    if lazy_load:
-        root: Optional[ET.Element] = None
-        for _event, elem in ET.iterparse(str(path), events=("end",)):
-            root = elem
-        if root is None:
-            raise InvalidTelemetryError("Empty XML document")
-        return root
-
-    return ET.parse(str(path)).getroot()
+        data = source
+    else:
+        with Path(source).open("rb") as stream:
+            data = stream.read(1024 * 1024 + 1)
+    if len(data) > 1024 * 1024:
+        raise InvalidTelemetryError("PDS4 XML exceeds 1 MiB")
+    # UTF-16/32 and entity/DTD declarations are refused before the XML parser.
+    # ElementTree does not follow schemaLocation or processing-instruction URLs.
+    if b"\x00" in data or b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
+        raise InvalidTelemetryError("XML DTDs/entities and non-UTF8 encodings are unsupported")
+    root = ET.fromstring(data)
+    if root.tag != "{http://pds.nasa.gov/pds4/pds/v1}Product_Observational":
+        raise InvalidTelemetryError("Expected PDS4 Product_Observational namespace/root")
+    stack = [(root, 1)]
+    count = 0
+    while stack:
+        node, depth = stack.pop()
+        count += 1
+        if count > 20000 or depth > 48:
+            raise InvalidTelemetryError("XML node/depth quota exceeded")
+        stack.extend((child, depth + 1) for child in node)
+    return root
 
 
 def _extract_fields(
@@ -353,8 +323,13 @@ def _extract_fields(
                 found["instrument"] = (text.upper(), None)
 
         canonical = _TAG_MAP.get(local)
-        if canonical is not None and canonical not in found:
-            found[canonical] = (text, elem.attrib.get("unit"))
+        if canonical is not None:
+            entry = (text, elem.attrib.get("unit"))
+            if canonical in found and found[canonical] != entry:
+                if canonical not in {'product_id', 'instrument'}:
+                    raise InvalidTelemetryError(f"Conflicting PDS4 telemetry field: {canonical}")
+            else:
+                found[canonical] = entry
 
     return found, corner_lats, corner_lons
 
@@ -383,7 +358,7 @@ def parse_metadata(
     Returns
     -------
     LunarTelemetryMetadata
-        Fully validated telemetry record.
+        Validated optional telemetry fields; not a validated image association.
 
     Raises
     ------
@@ -401,7 +376,9 @@ def parse_metadata(
         if entry is None:
             if default is not None:
                 return default
-            raise InvalidTelemetryError(f"Missing required field: {display_name}")
+            return None
+        if entry[0].strip().upper() in {"NULL", "UNK", "N/A", "UNKNOWN"}:
+            return None
         val = _try_float(entry[0])
         if val is None:
             raise InvalidTelemetryError(
@@ -411,8 +388,8 @@ def parse_metadata(
 
     gsd = _require_float("gsd", "pixel_resolution / GSD")
     inc = _require_float("incidence_angle", "incidence_angle")
-    # Emission angle defaults to 0.0 (nadir) if not explicitly present in label
-    emi = _require_float("emission_angle", "emission_angle", default=0.0)
+    # Absence is unknown; never manufacture a nadir observation.
+    emi = _require_float("emission_angle", "emission_angle")
     azi = _require_float("solar_azimuth", "solar_azimuth_angle")
 
     # ── Optional text fields ─────────────────────────────────────

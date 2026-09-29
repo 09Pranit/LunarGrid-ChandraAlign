@@ -7,6 +7,11 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+if __package__:
+    from .lunar_core.preprocess.wallis import apply_wallis_filter
+else:
+    from lunar_core.preprocess.wallis import apply_wallis_filter
+
 
 class RegistrationError(RuntimeError):
     pass
@@ -31,16 +36,13 @@ def _gray(image: np.ndarray) -> np.ndarray:
 
 
 def wallis_filter(image: np.ndarray, window: int = 41, target_mean: float = 128.0,
-                  target_std: float = 52.0, contrast: float = 0.82,
-                  brightness: float = 0.88) -> np.ndarray:
-    gray = _gray(image).astype(np.float32)
-    window = max(3, window | 1)
-    local_mean = cv2.boxFilter(gray, -1, (window, window), normalize=True)
-    local_square = cv2.boxFilter(gray * gray, -1, (window, window), normalize=True)
-    local_std = np.sqrt(np.maximum(local_square - local_mean * local_mean, 1.0))
-    gain = contrast * target_std / (contrast * local_std + (1.0 - contrast) * target_std)
-    result = (gray - local_mean) * gain + brightness * target_mean + (1.0 - brightness) * local_mean
-    return np.clip(result, 0, 255).astype(np.uint8)
+                  target_std: float = 52.0, contrast: float = 0.80,
+                  brightness: float = 0.20) -> np.ndarray:
+    """Compatibility entry point for the shared Phase 2 implementation."""
+    return apply_wallis_filter(
+        _gray(image), window_size=window, target_mean=target_mean,
+        target_std=target_std, contrast=contrast, brightness=brightness,
+    )
 
 
 def spatial_coverage(points: np.ndarray, width: int, height: int, grid: int = 5) -> float:

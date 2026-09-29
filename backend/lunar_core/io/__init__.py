@@ -1,1 +1,1 @@
-"""I/O modules for PDS4 label parsing and raster ingestion."""
+"""PDS4 parsing and lunar raster export (geotiff_exporter)."""
